@@ -16,14 +16,14 @@ weight_hg=$(jq -r '.weight' data.json)
 type=$(jq -r '.types[0].type.name' data.json)
 
 # Convert height from decimeters to meters using awk
-height_m=$(echo "$height_dm" | awk '{printf "%.1f", $1/10}')
+formatted_height=$(echo "$height_dm" | awk '{printf "%.1f", $1/10}')
 
 # Convert weight from hectograms to kg using awk
-weight_kg=$(echo "$weight_hg" | awk '{printf "%d", $1/10}')
+formatted_weight=$(echo "$weight_hg" | awk '{printf "%d", $1/10}')
 
 # Capitalize the first letter of name and type using sed
-name_capitalized=$(echo "$name" | sed 's/^./\U&/')
-type_capitalized=$(echo "$type" | sed 's/^./\U&/')
+name=$(echo "$name" | sed 's/^./\U&/')
+type=$(echo "$type" | sed 's/^./\U&/')
 
 # Format and output the final result
-echo "$name_capitalized is of type $type_capitalized, weighs ${weight_kg}kg, and is ${height_m}m tall."
+echo "$name is of type $type, weighs ${formatted_weight}kg, and is ${formatted_height}m tall."

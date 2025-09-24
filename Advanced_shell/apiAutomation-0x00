@@ -1,0 +1,129 @@
+#!/bin/bash
+
+# apiAutomation-0x00
+# Shell script to fetch Pikachu data from the Pokémon API
+# Saves successful responses to data.json and errors to errors.txt
+
+# API endpoint for Pikachu
+API_URL="https://pokeapi.co/api/v2/pokemon/pikachu"
+
+# Output files
+DATA_FILE="data.json"
+ERROR_FILE="errors.txt"
+
+# Function to log errors with timestamp
+log_error() {
+    local error_message="$1"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] ERROR: $error_message" >> "$ERROR_FILE"
+}
+
+# Function to make API request
+fetch_pokemon_data() {
+    echo "Fetching Pikachu data from Pokémon API..."
+    
+    # Make the API request with curl
+    # -s: silent mode (no progress bar)
+    # -w: write HTTP status code to stdout
+    # -o: output response body to file
+    local http_status=$(curl -s -w "%{http_code}" -o "$DATA_FILE" "$API_URL")
+    local curl_exit_code=$?
+    
+    # Check if curl command succeeded
+    if [ $curl_exit_code -ne 0 ]; then
+        log_error "curl command failed with exit code: $curl_exit_code"
+        echo "Error: Failed to connect to the API. Check your internet connection."
+        return 1
+    fi
+    
+    # Check HTTP status code
+    case $http_status in
+        200)
+            echo "Success! Pikachu data saved to $DATA_FILE"
+            return 0
+            ;;
+        404)
+            log_error "HTTP 404 - Pokémon not found"
+            echo "Error: Pokémon not found (HTTP 404)"
+            rm -f "$DATA_FILE"  # Remove empty/invalid file
+            return 1
+            ;;
+        429)
+            log_error "HTTP 429 - Rate limit exceeded"
+            echo "Error: Rate limit exceeded. Please try again later."
+            rm -f "$DATA_FILE"
+            return 1
+            ;;
+        500|502|503|504)
+            log_error "HTTP $http_status - Server error"
+            echo "Error: Server error (HTTP $http_status). Please try again later."
+            rm -f "$DATA_FILE"
+            return 1
+            ;;
+        *)
+            log_error "HTTP $http_status - Unexpected response"
+            echo "Error: Unexpected HTTP status code: $http_status"
+            rm -f "$DATA_FILE"
+            return 1
+            ;;
+    esac
+}
+
+# Function to validate JSON response
+validate_json() {
+    if command -v jq >/dev/null 2>&1; then
+        if ! jq empty "$DATA_FILE" >/dev/null 2>&1; then
+            log_error "Invalid JSON response received"
+            echo "Error: Invalid JSON response"
+            rm -f "$DATA_FILE"
+            return 1
+        fi
+    else
+        echo "Warning: jq not found. Cannot validate JSON format."
+    fi
+    return 0
+}
+
+# Main execution
+main() {
+    echo "=== Pokémon API Automation Script ==="
+    echo "Target: Pikachu"
+    echo "API URL: $API_URL"
+    echo ""
+    
+    # Remove previous data file if it exists
+    [ -f "$DATA_FILE" ] && rm -f "$DATA_FILE"
+    
+    # Fetch the data
+    if fetch_pokemon_data; then
+        # Validate the JSON if jq is available
+        if validate_json; then
+            echo ""
+            echo "=== Operation Completed Successfully ==="
+            echo "Data file: $DATA_FILE"
+            
+            # Display file size
+            if [ -f "$DATA_FILE" ]; then
+                local file_size=$(wc -c < "$DATA_FILE" 2>/dev/null || echo "unknown")
+                echo "File size: $file_size bytes"
+            fi
+            
+            # Show first few lines if jq is available
+            if command -v jq >/dev/null 2>&1; then
+                echo ""
+                echo "Preview (first 10 lines):"
+                jq . < "$DATA_FILE" | head -n 10
+            fi
+        else
+            exit 1
+        fi
+    else
+        echo ""
+        echo "=== Operation Failed ==="
+        echo "Check $ERROR_FILE for details"
+        exit 1
+    fi
+}
+
+# Run the main function
+main "$@"

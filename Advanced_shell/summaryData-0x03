@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# Pokémon Data Summary Report Script
+# File: summaryData-0x03
+# Description: Reads JSON files and generates a CSV report with statistics
+
+# Configuration
+JSON_DIR="pokemon_data"
+CSV_FILE="pokemon_report.csv"
+
+# Check if pokemon_data directory exists
+if [ ! -d "$JSON_DIR" ]; then
+    echo "Error: Directory '$JSON_DIR' not found!"
+    echo "Please run the batch processing script first to generate Pokémon data."
+    exit 1
+fi
+
+# Check if JSON files exist
+json_files=$(ls "$JSON_DIR"/*.json 2>/dev/null | wc -l)
+if [ "$json_files" -eq 0 ]; then
+    echo "Error: No JSON files found in '$JSON_DIR' directory!"
+    exit 1
+fi
+
+# Create CSV header
+echo "Name,Height (m),Weight (kg)" > "$CSV_FILE"
+
+# Temporary file for data processing
+temp_file=$(mktemp)
+
+echo "Processing Pokémon data..."
+
+# Process each JSON file
+for json_file in "$JSON_DIR"/*.json; do
+    if [ -f "$json_file" ]; then
+        # Extract name, height (decimeters), and weight (hectograms) using jq
+        name=$(jq -r '.name' "$json_file" 2>/dev/null)
+        height_dm=$(jq -r '.height' "$json_file" 2>/dev/null)
+        weight_hg=$(jq -r '.weight' "$json_file" 2>/dev/null)
+        
+        # Check if extraction was successful
+        if [ "$name" != "null" ] && [ "$height_dm" != "null" ] && [ "$weight_hg" != "null" ]; then
+            # Convert height from decimeters to meters and weight from hectograms to kg
+            height_m=$(echo "$height_dm" | awk '{printf "%.1f", $1/10}')
+            weight_kg=$(echo "$weight_hg" | awk '{printf "%.1f", $1/10}')
+            
+            # Capitalize first letter of name
+            formatted_name=$(echo "$name" | sed 's/^./\U&/')
+            
+            # Add to CSV
+            echo "$formatted_name,$height_m,$weight_kg" >> "$CSV_FILE"
+            
+            # Add to temp file for average calculations
+            echo "$height_m $weight_kg" >> "$temp_file"
+            
+            echo "Processed: $formatted_name"
+        else
+            echo "Warning: Failed to extract data from $json_file"
+        fi
+    fi
+done
+
+echo ""
+echo "CSV Report generated at: $CSV_FILE"
+echo ""
+
+# Display CSV content
+cat "$CSV_FILE"
+echo ""
+
+# Calculate averages using awk
+if [ -s "$temp_file" ]; then
+    averages=$(awk '
+    {
+        height_sum += $1
+        weight_sum += $2
+        count++
+    }
+    END {
+        if (count > 0) {
+            avg_height = height_sum / count
+            avg_weight = weight_sum / count
+            printf "%.2f %.2f", avg_height, avg_weight
+        }
+    }' "$temp_file")
+    
+    # Extract individual averages
+    avg_height=$(echo "$averages" | awk '{print $1}')
+    avg_weight=$(echo "$averages" | awk '{print $2}')
+    
+    echo "Average Height: $avg_height m"
+    echo "Average Weight: $avg_weight kg"
+else
+    echo "No data available for average calculations."
+fi
+
+# Clean up temporary file
+rm -f "$temp_file"

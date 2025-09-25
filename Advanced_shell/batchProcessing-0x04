@@ -1,0 +1,325 @@
+#!/bin/bash
+
+# Parallel Batch Processing Script for Pokémon API Data Retrieval
+# File: batchProcessing-0x04
+# Description: Fetches data for multiple Pokémon in parallel using background processes
+
+# API base URL
+API_URL="https://pokeapi.co/api/v2/pokemon"
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Output directory
+OUTPUT_DIR="pokemon_data"
+
+# Configuration
+MAX_RETRIES=3
+RETRY_DELAY=1
+LOG_FILE="pokemon_parallel_fetch.log"
+TEMP_DIR="temp_parallel"
+MAX_PARALLEL_JOBS=5
+
+# Create output and temp directories if they don't exist
+if [ ! -d "$OUTPUT_DIR" ]; then
+    mkdir -p "$OUTPUT_DIR"
+    echo "Created directory: $OUTPUT_DIR"
+fi
+
+if [ ! -d "$TEMP_DIR" ]; then
+    mkdir -p "$TEMP_DIR"
+    echo "Created temporary directory: $TEMP_DIR"
+fi
+
+# Initialize log file
+echo "=== Parallel Pokémon Fetch Log - $(date) ===" > "$LOG_FILE"
+
+# Function to log messages
+log_message() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] $level: $message" >> "$LOG_FILE"
+    echo "[$timestamp] $level: $message"
+}
+
+# Function to validate Pokémon name
+validate_pokemon_name() {
+    local pokemon_name="$1"
+    
+    # Check if name contains only lowercase letters and hyphens
+    if [[ ! "$pokemon_name" =~ ^[a-z-]+$ ]]; then
+        return 1
+    fi
+    
+    # Check minimum length
+    if [ ${#pokemon_name} -lt 3 ]; then
+        return 1
+    fi
+    
+    return 0
+}
+
+# Function to check network connectivity
+check_network() {
+    if ! curl -s --connect-timeout 5 --max-time 10 "https://pokeapi.co" > /dev/null; then
+        return 1
+    fi
+    return 0
+}
+
+# Function to fetch a single Pokémon's data (runs in background)
+fetch_pokemon_worker() {
+    local pokemon_name="$1"
+    local worker_id="$2"
+    local output_file="$OUTPUT_DIR/${pokemon_name}.json"
+    local status_file="$TEMP_DIR/${pokemon_name}_status.txt"
+    local error_file="$TEMP_DIR/${pokemon_name}_error.txt"
+    local attempt=1
+    
+    # Initialize status file
+    echo "STARTED" > "$status_file"
+    
+    # Validate Pokémon name
+    if ! validate_pokemon_name "$pokemon_name"; then
+        echo "FAILED" > "$status_file"
+        echo "Invalid Pokémon name format: $pokemon_name" > "$error_file"
+        log_message "ERROR" "[Worker $worker_id] Invalid Pokémon name format: $pokemon_name"
+        return 1
+    fi
+    
+    log_message "INFO" "[Worker $worker_id] Starting fetch for $pokemon_name"
+    
+    # Retry loop
+    while [ $attempt -le $MAX_RETRIES ]; do
+        log_message "INFO" "[Worker $worker_id] Attempt $attempt/$MAX_RETRIES for $pokemon_name"
+        
+        # Check network connectivity before attempting
+        if ! check_network; then
+            log_message "ERROR" "[Worker $worker_id] Network connectivity issue (attempt $attempt for $pokemon_name)"
+            if [ $attempt -eq $MAX_RETRIES ]; then
+                echo "FAILED" > "$status_file"
+                echo "Network connectivity failed after $MAX_RETRIES attempts" > "$error_file"
+                return 1
+            fi
+            sleep $RETRY_DELAY
+            ((attempt++))
+            continue
+        fi
+        
+        # Make API request with timeout and error handling
+        local http_code
+        http_code=$(curl -s -w "%{http_code}" -o "$output_file" \
+                   --connect-timeout 10 \
+                   --max-time 30 \
+                   --retry 0 \
+                   "$API_URL/$pokemon_name")
+        
+        local curl_exit_code=$?
+        
+        # Check curl exit code
+        if [ $curl_exit_code -ne 0 ]; then
+            case $curl_exit_code in
+                6)  log_message "ERROR" "[Worker $worker_id] Could not resolve host (attempt $attempt for $pokemon_name)" ;;
+                7)  log_message "ERROR" "[Worker $worker_id] Failed to connect to host (attempt $attempt for $pokemon_name)" ;;
+                28) log_message "ERROR" "[Worker $worker_id] Operation timeout (attempt $attempt for $pokemon_name)" ;;
+                *)  log_message "ERROR" "[Worker $worker_id] Curl error code $curl_exit_code (attempt $attempt for $pokemon_name)" ;;
+            esac
+        # Check HTTP status code
+        elif [ "$http_code" = "404" ]; then
+            echo "FAILED" > "$status_file"
+            echo "Pokémon '$pokemon_name' not found (HTTP 404)" > "$error_file"
+            log_message "ERROR" "[Worker $worker_id] Pokémon '$pokemon_name' not found (HTTP 404)"
+            rm -f "$output_file"
+            return 1
+        elif [ "$http_code" = "429" ]; then
+            log_message "ERROR" "[Worker $worker_id] Rate limit exceeded (HTTP 429) (attempt $attempt for $pokemon_name)"
+            sleep $((RETRY_DELAY * 2))
+        elif [[ "$http_code" =~ ^[45][0-9][0-9]$ ]]; then
+            log_message "ERROR" "[Worker $worker_id] HTTP error $http_code (attempt $attempt for $pokemon_name)"
+        elif [ "$http_code" = "200" ]; then
+            # Check if the file was created and contains valid JSON
+            if [ -s "$output_file" ] && jq empty "$output_file" 2>/dev/null; then
+                echo "SUCCESS" > "$status_file"
+                log_message "INFO" "[Worker $worker_id] Successfully fetched $pokemon_name on attempt $attempt"
+                return 0
+            else
+                log_message "ERROR" "[Worker $worker_id] Invalid JSON received (attempt $attempt for $pokemon_name)"
+                rm -f "$output_file"
+            fi
+        else
+            log_message "ERROR" "[Worker $worker_id] Unexpected HTTP code $http_code (attempt $attempt for $pokemon_name)"
+        fi
+        
+        # If this was the last attempt, give up
+        if [ $attempt -eq $MAX_RETRIES ]; then
+            echo "FAILED" > "$status_file"
+            echo "Failed to fetch $pokemon_name after $MAX_RETRIES attempts" > "$error_file"
+            log_message "ERROR" "[Worker $worker_id] Giving up on $pokemon_name after $MAX_RETRIES attempts"
+            rm -f "$output_file"
+            return 1
+        fi
+        
+        # Wait before retrying
+        sleep $RETRY_DELAY
+        ((attempt++))
+    done
+    
+    echo "FAILED" > "$status_file"
+    return 1
+}
+
+# Function to monitor background processes
+monitor_processes() {
+    local pids=("$@")
+    local completed=0
+    local total=${#pids[@]}
+    
+    echo "Monitoring $total background processes..."
+    
+    while [ $completed -lt $total ]; do
+        completed=0
+        for pid in "${pids[@]}"; do
+            if ! kill -0 "$pid" 2>/dev/null; then
+                ((completed++))
+            fi
+        done
+        
+        echo "Progress: $completed/$total processes completed"
+        sleep 1
+    done
+    
+    echo "All background processes completed!"
+}
+
+# Function to collect results from all workers
+collect_results() {
+    local successful_count=0
+    local failed_count=0
+    
+    echo
+    echo "=== COLLECTING RESULTS ==="
+    
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        local status_file="$TEMP_DIR/${pokemon}_status.txt"
+        local error_file="$TEMP_DIR/${pokemon}_error.txt"
+        
+        if [ -f "$status_file" ]; then
+            local status=$(cat "$status_file")
+            case "$status" in
+                "SUCCESS")
+                    echo "✅ $pokemon: Successfully fetched"
+                    ((successful_count++))
+                    ;;
+                "FAILED")
+                    echo "❌ $pokemon: Failed"
+                    if [ -f "$error_file" ]; then
+                        echo "   Error: $(cat "$error_file")"
+                    fi
+                    ((failed_count++))
+                    ;;
+                *)
+                    echo "⚠️  $pokemon: Unknown status ($status)"
+                    ((failed_count++))
+                    ;;
+            esac
+        else
+            echo "❌ $pokemon: No status file found"
+            ((failed_count++))
+        fi
+    done
+    
+    echo
+    echo "=== FINAL SUMMARY ==="
+    echo "Total Pokémon processed: ${#POKEMON_LIST[@]}"
+    echo "Successful: $successful_count"
+    echo "Failed: $failed_count"
+    echo "Success rate: $(( successful_count * 100 / ${#POKEMON_LIST[@]} ))%"
+    
+    # Log final summary
+    log_message "INFO" "Parallel processing complete: $successful_count successful, $failed_count failed"
+    
+    return $failed_count
+}
+
+# Function to cleanup temporary files
+cleanup() {
+    echo "Cleaning up temporary files..."
+    rm -rf "$TEMP_DIR"
+    echo "Cleanup completed."
+}
+
+# Main execution
+main() {
+    local start_time=$(date +%s)
+    
+    echo "Starting parallel batch processing of ${#POKEMON_LIST[@]} Pokémon..."
+    echo "Output directory: $OUTPUT_DIR"
+    echo "Max parallel jobs: $MAX_PARALLEL_JOBS"
+    echo "Max retries per Pokémon: $MAX_RETRIES"
+    echo "Log file: $LOG_FILE"
+    echo
+    
+    # Array to store background process PIDs
+    local pids=()
+    local worker_id=1
+    
+    # Launch background processes for each Pokémon
+    echo "Launching parallel workers..."
+    for pokemon in "${POKEMON_LIST[@]}"; do
+        echo "Starting worker $worker_id for $pokemon..."
+        fetch_pokemon_worker "$pokemon" "$worker_id" &
+        pids+=($!)
+        ((worker_id++))
+        
+        # Optional: Add small delay to prevent overwhelming the API
+        sleep 0.1
+    done
+    
+    echo "All workers launched. PIDs: ${pids[*]}"
+    echo
+    
+    # Monitor and wait for all background processes to complete
+    monitor_processes "${pids[@]}"
+    
+    # Wait for all background processes to finish (redundant but safe)
+    echo "Waiting for all processes to complete..."
+    for pid in "${pids[@]}"; do
+        wait "$pid"
+    done
+    
+    # Calculate execution time
+    local end_time=$(date +%s)
+    local execution_time=$((end_time - start_time))
+    
+    echo
+    echo "All parallel processes completed in ${execution_time} seconds!"
+    
+    # Collect and display results
+    collect_results
+    local exit_code=$?
+    
+    # Cleanup temporary files
+    cleanup
+    
+    # Display performance summary
+    echo
+    echo "=== PERFORMANCE SUMMARY ==="
+    echo "Total execution time: ${execution_time} seconds"
+    echo "Average time per Pokémon: $(( execution_time * 1000 / ${#POKEMON_LIST[@]} )) ms"
+    echo "Parallel efficiency: ~$(( ${#POKEMON_LIST[@]} * 100 / execution_time ))% faster than sequential"
+    
+    if [ $exit_code -eq 0 ]; then
+        echo "✅ All Pokémon data retrieved successfully!"
+        exit 0
+    else
+        echo "⚠️  Some requests failed. Check the log file: $LOG_FILE"
+        exit 1
+    fi
+}
+
+# Set up signal handlers for cleanup
+trap cleanup EXIT INT TERM
+
+# Run main function
+main "$@"

@@ -1,0 +1,74 @@
+#!/bin/bash
+
+# Batch Processing Script for Pokémon API Data Retrieval
+# File: batchProcessing-0x02
+# Description: Fetches data for multiple Pokémon and saves to separate JSON files
+
+# API base URL
+API_URL="https://pokeapi.co/api/v2/pokemon"
+
+# List of Pokémon to fetch
+POKEMON_LIST=("bulbasaur" "ivysaur" "venusaur" "charmander" "charmeleon")
+
+# Output directory
+OUTPUT_DIR="pokemon_data"
+
+# Create output directory if it doesn't exist
+if [ ! -d "$OUTPUT_DIR" ]; then
+    mkdir -p "$OUTPUT_DIR"
+    echo "Created directory: $OUTPUT_DIR"
+fi
+
+# Function to fetch Pokémon data
+fetch_pokemon_data() {
+    local pokemon_name="$1"
+    local output_file="$OUTPUT_DIR/${pokemon_name}.json"
+    
+    echo "Fetching data for $pokemon_name..."
+    
+    # Make API request and save to file
+    if curl -s -o "$output_file" "$API_URL/$pokemon_name"; then
+        # Check if the file was created and contains valid JSON
+        if [ -s "$output_file" ] && jq empty "$output_file" 2>/dev/null; then
+            echo "Saved data to $output_file ✅"
+        else
+            echo "❌ Failed to save valid data for $pokemon_name"
+            rm -f "$output_file"  # Remove invalid file
+            return 1
+        fi
+    else
+        echo "❌ Failed to fetch data for $pokemon_name"
+        return 1
+    fi
+}
+
+# Main execution
+echo "Starting batch Pokémon data retrieval..."
+echo "========================================="
+
+# Counter for successful fetches
+success_count=0
+total_count=${#POKEMON_LIST[@]}
+
+# Loop through each Pokémon
+for pokemon in "${POKEMON_LIST[@]}"; do
+    if fetch_pokemon_data "$pokemon"; then
+        ((success_count++))
+    fi
+    
+    # Add delay to handle rate limiting (1 second between requests)
+    if [ $pokemon != "${POKEMON_LIST[-1]}" ]; then
+        sleep 1
+    fi
+done
+
+echo "========================================="
+echo "Batch processing completed!"
+echo "Successfully fetched: $success_count/$total_count Pokémon"
+
+# List the created files
+if [ $success_count -gt 0 ]; then
+    echo ""
+    echo "Created files:"
+    ls -la "$OUTPUT_DIR"/*.json 2>/dev/null || echo "No JSON files found in $OUTPUT_DIR"
+fi
